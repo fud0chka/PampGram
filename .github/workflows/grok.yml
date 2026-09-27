@@ -99,38 +99,65 @@ jobs:
             --target="//$dir:$target" || true
         done
 
-    - name: Extract any built libraries / frameworks
+        - name: Extract dylib
       run: |
-        echo "=== Ищем собранные артефакты ==="
-        find telegram/bazel-out -iname "*pamp*" 2>/dev/null | head -50
-        find telegram/bazel-bin -iname "*pamp*" 2>/dev/null | head -50
+        cd telegram
         
-        # Пробуем найти framework или .a
-        FRAMEWORK=$(find telegram/bazel-out -path "*PampGram*.framework" -type d | head -1)
-        LIB=$(find telegram/bazel-out -name "libPampGram*.a" | head -1)
+        echo "=== Полный поиск всего, что связано с PampGram ==="
+        find bazel-out -iname "*pamp*" 2>/dev/null | head -100
+        
+        echo ""
+        echo "=== Ищем .framework ==="
+        find bazel-out -name "*.framework" -type d 2>/dev/null | grep -i pamp || true
+        
+        echo ""
+        echo "=== Ищем .a ==="
+        find bazel-out -name "lib*Pamp*.a" 2>/dev/null || true
+        
+        # Самый вероятный путь к framework
+        FRAMEWORK=$(find bazel-out -path "*PampGram*.framework" -type d | head -1)
+        
+        if [ -z "$FRAMEWORK" ]; then
+          # Пробуем найти любой framework, который мы собирали
+          FRAMEWORK=$(find bazel-out -name "*.framework" -type d | grep -E "(PampGram|PhantomGift|SettingsUI)" | head -1)
+        fi
         
         if [ -n "$FRAMEWORK" ]; then
           echo "Найден framework: $FRAMEWORK"
-          if [ -f "$FRAMEWORK/PampGram" ] || [ -f "$FRAMEWORK/PampGramCore" ]; then
-            cp "$FRAMEWORK"/* ./ 2>/dev/null || true
+          ls -la "$FRAMEWORK"
+          
+          # Бинарник обычно называется так же, как framework без расширения
+          BINARY_NAME=$(basename "$FRAMEWORK" .framework)
+          
+          if [ -f "$FRAMEWORK/$BINARY_NAME" ]; then
+            cp "$FRAMEWORK/$BINARY_NAME" ../PampGram.dylib
+            echo "Скопировал бинарник: $BINARY_NAME → PampGram.dylib"
+          else
+            # Иногда бинарник лежит просто как файл внутри
+            find "$FRAMEWORK" -type f -perm +111 | head -5
+            FIRST_BINARY=$(find "$FRAMEWORK" -type f -perm +111 | head -1)
+            if [ -n "$FIRST_BINARY" ]; then
+              cp "$FIRST_BINARY" ../PampGram.dylib
+              echo "Скопировал: $FIRST_BINARY"
+            fi
+          fi
+        else
+          echo "Framework не найден. Пробуем взять статическую библиотеку..."
+          LIB=$(find bazel-out -name "libPampGram*.a" | head -1)
+          if [ -n "$LIB" ]; then
+            cp "$LIB" ../PampGram.a
+            echo "Взял статическую библиотеку: $LIB"
           fi
         fi
         
-        if [ -n "$LIB" ]; then
-          echo "Найдена библиотека: $LIB"
-          cp "$LIB" ./
-        fi
-        
-        ls -la
+        cd ..
+        ls -lh PampGram.* 2>/dev/null || echo "Ничего не извлеклось"
 
-    - name: Upload artifacts
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: PampGram-build
+        name: PampGram-dylib
         path: |
-          telegram/bazel-out/**/*PampGram*
-          telegram/bazel-bin/**/*PampGram*
-          *.a
-          *.dylib
-          *.framework
+          PampGram.dylib
+          PampGram.a
         if-no-files-found: warn
