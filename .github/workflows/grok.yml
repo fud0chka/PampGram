@@ -1,0 +1,136 @@
+name: Build PampGram Dylib
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+
+    steps:
+    - name: Clone Telegram-iOS
+      uses: actions/checkout@v4
+      with:
+        repository: TelegramMessenger/Telegram-iOS
+        submodules: recursive
+        path: telegram
+
+    - name: Clone PampGram (fud0chka)
+      uses: actions/checkout@v4
+      with:
+        repository: fud0chka/PampGram
+        path: pampgram
+
+    - name: Select Xcode 26.2
+      run: |
+        sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+        sudo xcodebuild -license accept
+        xcodebuild -version
+
+    - name: Setup Bazelisk
+      run: brew install bazelisk
+
+    - name: Apply PampGram mod
+      run: |
+        cd telegram
+        
+        # 1. Применяем патч
+        git apply --reject --whitespace=fix ../pampgram/mod/telegram-ios.patch || true
+        
+        # 2. Копируем компоненты мода (как написано в README PampGram)
+        mkdir -p submodules/TelegramUI/Components/PampGram
+        cp -R ../pampgram/mod/components/. submodules/TelegramUI/Components/PampGram/
+        
+        echo "=== Компоненты PampGram ==="
+        find submodules/TelegramUI/Components/PampGram -type d
+        find submodules/TelegramUI/Components/PampGram -name "*.swift" | head -30
+
+    - name: Create config
+      run: |
+        cd telegram
+        mkdir -p build-input
+        cat > build-input/data.json << 'EOF'
+        {
+          "bundle_id": "org.telegram.Telegram-iOS",
+          "api_id": "8",
+          "api_hash": "7245de8e747a0d6fbe11f7cc14fcc0bb",
+          "team_id": "XXXXXXXXXX",
+          "app_center_id": "",
+          "is_internal_build": "true",
+          "is_appstore_build": "false",
+          "appstore_id": "0",
+          "app_specific_url_scheme": "tg",
+          "premium_iap_product_id": "",
+          "enable_siri": false,
+          "enable_icloud": false
+        }
+        EOF
+
+    - name: Build PampGram framework
+      run: |
+        cd telegram
+        
+        # Пробуем собрать основные модули мода
+        python3 build-system/Make/Make.py \
+          --overrideXcodeVersion \
+          build \
+          --configurationPath=build-input/data.json \
+          --configuration=release_arm64 \
+          --buildNumber=10000 \
+          --xcodeManagedCodesigning \
+          --target=//submodules/TelegramUI/Components/PampGram/PampGramCore:PampGramCore \
+          || true
+        
+        # Собираем всё, что есть в PampGram
+        find submodules/TelegramUI/Components/PampGram -name "BUILD" -exec dirname {} \; | while read dir; do
+          target=$(basename "$dir")
+          echo "Trying to build $dir:$target"
+          python3 build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            build \
+            --configurationPath=build-input/data.json \
+            --configuration=release_arm64 \
+            --buildNumber=10000 \
+            --xcodeManagedCodesigning \
+            --target="//$dir:$target" || true
+        done
+
+    - name: Extract any built libraries / frameworks
+      run: |
+        echo "=== Ищем собранные артефакты ==="
+        find telegram/bazel-out -iname "*pamp*" 2>/dev/null | head -50
+        find telegram/bazel-bin -iname "*pamp*" 2>/dev/null | head -50
+        
+        # Пробуем найти framework или .a
+        FRAMEWORK=$(find telegram/bazel-out -path "*PampGram*.framework" -type d | head -1)
+        LIB=$(find telegram/bazel-out -name "libPampGram*.a" | head -1)
+        
+        if [ -n "$FRAMEWORK" ]; then
+          echo "Найден framework: $FRAMEWORK"
+          if [ -f "$FRAMEWORK/PampGram" ] || [ -f "$FRAMEWORK/PampGramCore" ]; then
+            cp "$FRAMEWORK"/* ./ 2>/dev/null || true
+          fi
+        fi
+        
+        if [ -n "$LIB" ]; then
+          echo "Найдена библиотека: $LIB"
+          cp "$LIB" ./
+        fi
+        
+        ls -la
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: PampGram-build
+        path: |
+          telegram/bazel-out/**/*PampGram*
+          telegram/bazel-bin/**/*PampGram*
+          *.a
+          *.dylib
+          *.framework
+        if-no-files-found: warn
